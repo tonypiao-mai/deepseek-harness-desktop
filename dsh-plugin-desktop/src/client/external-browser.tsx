@@ -78,6 +78,22 @@ function subscribe(fn: () => void): () => void {
   return () => { listeners.delete(fn) }
 }
 
+// Shared webview navigation handle so code outside the panel (e.g. link
+// interception) can drive the guest directly, not only via the address bar.
+let navWebview: WebviewElement | null = null
+let navDomReady = false
+let navPending: string | undefined
+
+/** Load a URL in the guest, queuing it until the guest is dom-ready. */
+function requestNavigate(url: string): void {
+  state.url = url
+  if (navWebview && navDomReady) {
+    void navWebview.loadURL(url).catch(() => {})
+  } else {
+    navPending = url
+  }
+}
+
 /** Return whether the window currently displays the external browser panel. */
 export function externalBrowserOpen(): boolean {
   return state.open
@@ -85,7 +101,7 @@ export function externalBrowserOpen(): boolean {
 
 /** Open the panel and navigate it to a URL (or show it as-is when url is empty). */
 export function openExternalBrowser(url = ''): void {
-  if (url) state.url = url
+  if (url) requestNavigate(url)
   state.open = true
   applyBrowserLayout()
   notify()
@@ -142,8 +158,11 @@ export function ExternalBrowserToggle(): JSX.Element {
 export function ExternalBrowserPanel(): JSX.Element {
   const webviewRef = useRef<WebviewElement | null>(null)
   const domReady = useRef(false)
-  const pendingURL = useRef<string | undefined>(undefined)
-  const dragState = useRef<{ startX: number; startWidth: number } | null>(null)
+  const dragState = useRef<{
+    pointerId: number
+    startX: number
+    startWidth: number
+  } | null>(null)
   const [, setTick] = useState(0)
   const [address, setAddress] = useState(state.url)
   const [title, setTitle] = useState('')
@@ -167,18 +186,19 @@ export function ExternalBrowserPanel(): JSX.Element {
     }
   }
 
-  // Stable ref: store the element and set its initial <src> once. React calls
-  // ref callbacks on mount and re-runs them on every render when the callback
-  // identity changes, so keep this callback stable and do NOT add listeners
-  // here — listener wiring lives in the effect below to avoid duplicates.
+  // Stable ref: store the element (and share it for outside navigation) and set
+  // its initial <src> once. Keep this callback stable so React does NOT re-run
+  // it every render — listener wiring lives in the effect below.
   const webviewRefCb = useCallback((el: HTMLElement | null): void => {
     const wv = el as WebviewElement | null
     webviewRef.current = wv
+    navWebview = wv
     if (!wv) return
     if (wv.getAttribute('src') == null) {
       wv.setAttribute('src', state.url || 'about:blank')
     }
     domReady.current = false
+    navDomReady = false
   }, [state.url])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // Attach guest listeners exactly once while the panel is open.
@@ -187,11 +207,12 @@ export function ExternalBrowserPanel(): JSX.Element {
     if (!wv) return
     const onDomReady = (): void => {
       domReady.current = true
+      navDomReady = true
       refreshNav(wv)
       setTitle((wv.getAttribute('title') ?? ''))
-      if (pendingURL.current) {
-        void wv.loadURL(pendingURL.current).catch(() => {})
-        pendingURL.current = undefined
+      if (navPending) {
+        void wv.loadURL(navPending).catch(() => {})
+        navPending = undefined
       }
     }
     const onNavigate = (): void => {
@@ -229,34 +250,24 @@ export function ExternalBrowserPanel(): JSX.Element {
     }
   }, [state.open, state.width])  // eslint-disable-line react-hooks/exhaustive-deps
 
-  const loadURL = (url: string): void => {
-    const wv = webviewRef.current
-    if (!wv) {
-      state.url = url
-      return
-    }
-    if (!domReady.current) {
-      pendingURL.current = url
-      return
-    }
-    void wv.loadURL(url).catch(() => {})
-  }
-
   const navigate = (): void => {
     const url = normalizeAddress(address)
     if (!url) return
     setAddress(url)
-    loadURL(url)
+    requestNavigate(url)
   }
 
-  const startDrag = (event: React.PointerEvent): void => {
+  const startDrag = (event: React.PointerEvent<HTMLDivElement>): void => {
     event.preventDefault()
-    dragState.current = { startX: event.clientX, startWidth: state.width }
+    // Capture the pointer so move/up keep firing on this handle even when the
+    // cursor leaves its thin bounds; releasing on up/cancel clears the cursor.
+    event.currentTarget.setPointerCapture(event.pointerId)
+    dragState.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: state.width }
     document.body.classList.add('dsh-desktop-browser-dragging')
   }
-  const moveDrag = (event: React.PointerEvent): void => {
+  const moveDrag = (event: React.PointerEvent<HTMLDivElement>): void => {
     const drag = dragState.current
-    if (!drag) return
+    if (!drag || event.pointerId !== drag.pointerId) return
     // Dragging left increases panel width (handle sits on the panel's left edge).
     const next = clampWidth(drag.startWidth + (drag.startX - event.clientX))
     if (next !== state.width) {
@@ -264,7 +275,11 @@ export function ExternalBrowserPanel(): JSX.Element {
       notify()
     }
   }
-  const endDrag = (): void => {
+  const endDrag = (event: React.PointerEvent<HTMLDivElement>): void => {
+    if (!dragState.current) return
+    if (event.pointerId === dragState.current.pointerId) {
+      try { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId) } catch { /* noop */ }
+    }
     dragState.current = null
     document.body.classList.remove('dsh-desktop-browser-dragging')
   }
