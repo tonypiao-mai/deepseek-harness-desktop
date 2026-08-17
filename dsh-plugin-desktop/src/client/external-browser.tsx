@@ -263,11 +263,11 @@ export function applyExternalBrowser(ctx: ClientContext): () => void {
   bootstrap()
 
   const disposers: Array<() => void> = [
-    () => ctx.slots.inject('shell.overlay', () => ctx.slots.register(
+    ctx.slots.inject('shell.overlay', () => ctx.slots.register(
       { name: 'shell.overlay', id: 'dsh-desktop-external-browser', order: 50 },
       () => <ExternalBrowserPanel />,
     )),
-    () => ctx.slots.inject('shell.overlay', () => ctx.slots.register(
+    ctx.slots.inject('shell.overlay', () => ctx.slots.register(
       { name: 'shell.overlay', id: 'dsh-desktop-external-browser-toggle', order: 45 },
       () => <ExternalBrowserToggle />,
     )),
