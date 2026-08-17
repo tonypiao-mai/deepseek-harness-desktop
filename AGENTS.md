@@ -2,6 +2,15 @@
 
 This repository owns the desktop product around an unmodified DeepSeek Harness checkout.
 
+> **Tony-managed rolling worktree.** This is a Tony-managed repository (fork of
+> `anywhere-labs/deepseek-harness-desktop` under `tonypiao-mai/`). Use the main
+> worktree and one rolling feature branch per PR cycle against `origin/master`
+> (our fork), following the standing delivery authority in AGENTS.md: commit,
+> push a feature branch to `origin`, open a PR against our fork's `master`, and
+> merge it once validated. Do **not** push directly to `origin/master` or open
+> PRs against the upstream `anywhere-labs/deepseek-harness-desktop` unless
+> explicitly requested.
+
 - `deepseek-harness/` is a pinned upstream Git submodule. Never edit files inside it from a desktop feature branch.
 - `dsh-plugin-desktop/` owns the Cordis Host and Client faces, Electron bootstrap, packaging, and release tests.
 - `dsh-community-fabric/` owns the community interoperability RFC. Until schemas and a reviewed reference adapter exist, it remains a private documentation scaffold and must not declare loadable DSH or package entry points.
