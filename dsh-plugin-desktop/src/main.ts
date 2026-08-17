@@ -110,6 +110,17 @@ async function start(): Promise<void> {
     return
   }
 
+  // Upstream plugins (most notably HMR) require access to node internals.
+  // bin.ts launches Electron with --expose-internals, which makes those
+  // modules loadable, but Electron's main process does not mirror that flag
+  // into process.execArgv. The Cordis module loader gates its node-internals
+  // path on execArgv, so also surface the flag there before app-boot; this
+  // lets any HMR-enabled profile (e.g. `web`) load instead of failing with
+  // "--expose-internals is required for HMR service".
+  if (!process.execArgv.includes('--expose-internals')) {
+    process.execArgv.unshift('--expose-internals')
+  }
+
   let current: Context | undefined
   let profileStartup: DesktopProfileStartup | undefined
   let profileStatePath: string | undefined
