@@ -5,6 +5,22 @@ import type { UpdateCheckResult, UpdateRequest } from './update-checker.ts'
 /** Electron platforms supported by the DSH Desktop native adapter. */
 export type DesktopPlatform = 'darwin' | 'win32' | 'linux'
 
+/**
+ * The lone partition token allowed for guest webviews. The embedded external
+ * browser uses one persistent partition shared across every session so a
+ * signed-in site stays signed in everywhere; the main process validates every
+ * `will-attach-webview` against this exact string before relaxing any guest
+ * webPreferences (see electron-runtime.ts).
+ */
+export const EXTERNAL_BROWSER_PARTITION = 'persist:dsh-external-browser'
+
+/**
+ * Same-origin renderer route for reading/toggling desktop settings. Kept here
+ * (pure constants) so both the Host plugin and the browser client bundle can
+ * import it without dragging Host-only dependencies into the client.
+ */
+export const DESKTOP_SETTINGS_RENDERER_PATH = '/__dsh-desktop/settings'
+
 /** Native presentation modes selected by the desktop-shell Cordis row. */
 export type DesktopShellMode = 'compatibility' | 'advanced'
 

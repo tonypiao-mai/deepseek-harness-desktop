@@ -8,8 +8,10 @@ import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 import { applyAdvancedShell } from './advanced-shell.ts'
 import { startRendererBootReporter } from './boot-health.ts'
 import { parseDesktopClientEnvironment } from './environment.ts'
+import { applyExternalBrowser } from './external-browser.tsx'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
+export { applyExternalBrowser } from './external-browser.tsx'
 export {
   RENDERER_BOOT_REPORT_PATH,
   rendererBootReport,
@@ -35,4 +37,9 @@ export function apply(ctx: ClientContext): void {
     'dsh-plugin-desktop: renderer boot health report',
   )
   if (environment.mode === 'advanced') applyAdvancedShell(ctx, environment)
+  // The external browser works in every presentation mode.
+  ctx.effect(
+    () => applyExternalBrowser(ctx),
+    'dsh-plugin-desktop: external browser surface',
+  )
 }

@@ -32,6 +32,10 @@ export function compatibilityWindowOptions(
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      // Allow the renderer to host <webview> guests (the external browser).
+      // Every attach is validated against EXTERNAL_BROWSER_PARTITION and
+      // hardened in electron-runtime.ts's will-attach-webview handler.
+      webviewTag: true,
     },
   }
   if (platform === 'win32') options.autoHideMenuBar = true
@@ -66,6 +70,9 @@ export function advancedWindowOptions(
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      // Allow the renderer to host <webview> guests (the external browser).
+      // Validated + hardened in electron-runtime.ts's will-attach-webview.
+      webviewTag: true,
     },
   }
   if (platform === 'darwin') {

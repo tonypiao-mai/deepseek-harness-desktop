@@ -35,6 +35,7 @@ import { prepareTrayIcon } from './tray-icons.ts'
 import { downloadDesktopUpdate } from './update-download.ts'
 import type { UpdateCheckResult } from './update-checker.ts'
 import { desktopWindowOptions } from './window-options.ts'
+import { EXTERNAL_BROWSER_PARTITION } from './runtime.ts'
 
 /** Return the presentation mode opposite the active generation. */
 export function nextDesktopShellMode(mode: DesktopShellSpec['mode']): DesktopShellSpec['mode'] {
@@ -528,6 +529,19 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         // A malformed target is rejected with the same deny result.
       }
       return { action: 'deny' }
+    })
+
+    // Validate every guest webview attach: only the external-browser partition
+    // is allowed, and the guest is hardened (no Node, isolated, sandboxed).
+    window.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+      if (params.partition !== EXTERNAL_BROWSER_PARTITION) {
+        event.preventDefault()
+        return
+      }
+      webPreferences.nodeIntegration = false
+      webPreferences.contextIsolation = true
+      webPreferences.sandbox = true
+      delete webPreferences.preload
     })
 
     window.once('ready-to-show', show)
