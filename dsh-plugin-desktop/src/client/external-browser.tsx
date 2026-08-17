@@ -1,6 +1,6 @@
 /** Desktop-owned embedded external browser: a right-side <webview> panel. */
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import { DESKTOP_SETTINGS_RENDERER_PATH, EXTERNAL_BROWSER_PARTITION } from '../runtime.ts'
@@ -128,16 +128,68 @@ export function ExternalBrowserPanel(): JSX.Element {
     if (state.url) setAddress(state.url)
   }), [])
 
+  const refreshNav = (wv: WebviewElement): void => {
+    if (!domReady.current) return
+    try {
+      setCanBack(wv.canGoBack())
+      setCanForward(wv.canGoForward())
+    } catch {
+      // The guest may not expose navigation state yet; ignore.
+    }
+  }
+
+  // Stable ref: store the element and set its initial <src> once. React calls
+  // ref callbacks on mount and re-runs them on every render when the callback
+  // identity changes, so keep this callback stable and do NOT add listeners
+  // here — listener wiring lives in the effect below to avoid duplicates.
+  const webviewRefCb = useCallback((el: HTMLElement | null): void => {
+    const wv = el as WebviewElement | null
+    webviewRef.current = wv
+    if (!wv) return
+    if (wv.getAttribute('src') == null) {
+      wv.setAttribute('src', state.url || 'about:blank')
+    }
+    domReady.current = false
+  }, [state.url])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Attach guest listeners exactly once while the panel is open.
   useEffect(() => {
     const wv = webviewRef.current
-    if (!wv || wv.getAttribute('src') !== undefined) return
-    wv.setAttribute('src', state.url || 'about:blank')
-  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
-
-  const refreshNav = (wv: WebviewElement): void => {
-    setCanBack(wv.canGoBack())
-    setCanForward(wv.canGoForward())
-  }
+    if (!wv) return
+    const onDomReady = (): void => {
+      domReady.current = true
+      refreshNav(wv)
+      setTitle((wv.getAttribute('title') ?? ''))
+      if (pendingURL.current) {
+        void wv.loadURL(pendingURL.current).catch(() => {})
+        pendingURL.current = undefined
+      }
+    }
+    const onNavigate = (): void => {
+      setAddress(wv.getURL())
+      refreshNav(wv)
+      setTitle((wv.getAttribute('title') ?? ''))
+    }
+    const onTitle = (event: Event): void => {
+      setTitle(String((event as unknown as { title?: unknown }).title ?? ''))
+    }
+    const onFail = (event: Event): void => {
+      const detail = (event as unknown as { errorCode?: unknown; errorDescription?: unknown }).errorDescription
+      setTitle(String(detail ?? '页面加载失败'))
+    }
+    wv.addEventListener('dom-ready', onDomReady)
+    wv.addEventListener('did-navigate', onNavigate)
+    wv.addEventListener('did-navigate-in-page', onNavigate)
+    wv.addEventListener('page-title-updated', onTitle)
+    wv.addEventListener('did-fail-load', onFail)
+    return () => {
+      wv.removeEventListener('dom-ready', onDomReady)
+      wv.removeEventListener('did-navigate', onNavigate)
+      wv.removeEventListener('did-navigate-in-page', onNavigate)
+      wv.removeEventListener('page-title-updated', onTitle)
+      wv.removeEventListener('did-fail-load', onFail)
+    }
+  }, [open])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadURL = (url: string): void => {
     const wv = webviewRef.current
@@ -157,31 +209,6 @@ export function ExternalBrowserPanel(): JSX.Element {
     if (!url) return
     setAddress(url)
     loadURL(url)
-  }
-
-  const attach = (el: WebviewElement | null): void => {
-    webviewRef.current = el
-    if (!el) return
-    el.addEventListener('dom-ready', () => {
-      domReady.current = true
-      refreshNav(el)
-      setTitle((el.getAttribute('title') ?? ''))
-      const pending = pendingURL.current
-      if (pending) {
-        pendingURL.current = undefined
-        void el.loadURL(pending).catch(() => {})
-      }
-    })
-    const onNavigate = (): void => {
-      setAddress(el.getURL())
-      refreshNav(el)
-      setTitle((el.getAttribute('title') ?? ''))
-    }
-    el.addEventListener('did-navigate', onNavigate)
-    el.addEventListener('did-navigate-in-page', onNavigate)
-    el.addEventListener('page-title-updated', (event: Event) => {
-      setTitle(String((event as unknown as { title?: unknown }).title ?? ''))
-    })
   }
 
   if (!open) return <></>
@@ -217,7 +244,7 @@ export function ExternalBrowserPanel(): JSX.Element {
       </div>
       <div className="dshExternalBrowserBody">
         <webview
-          ref={attach as unknown as (el: HTMLElement | null) => void}
+          ref={webviewRefCb as unknown as (el: HTMLElement | null) => void}
           partition={EXTERNAL_BROWSER_PARTITION}
           className="dshExternalBrowserGuest"
         />
