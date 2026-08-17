@@ -60,7 +60,13 @@ async function launchElectron(): Promise<number> {
   }
   const mainPath = fileURLToPath(new URL('./main.js', import.meta.url))
   return new Promise<number>((resolveExit, reject) => {
-    const child = spawn(electronPath, [mainPath], { stdio: 'inherit', env: process.env })
+    // The desktop Host boots the Cordis tree in-process inside Electron's main
+    // process. Upstream plugins (most notably HMR) require access to node
+    // internals, which the Cordis module loader gates on --expose-internals.
+    // Pass it to the Electron process at launch so any HMR-enabled profile
+    // (e.g. `web`) can load instead of failing with "--expose-internals is
+    // required for HMR service".
+    const child = spawn(electronPath, ['--expose-internals', mainPath], { stdio: 'inherit', env: process.env })
     child.once('error', reject)
     child.once('exit', (code, signal) => {
       resolveExit(code ?? (signal === null ? 1 : 128))
