@@ -7,13 +7,22 @@ import { DESKTOP_SETTINGS_RENDERER_PATH, EXTERNAL_BROWSER_PARTITION } from '../r
 import {
   activateTab,
   closeTab,
-  emptyTabs,
   openTab,
   setTabTitle,
   setTabUrl,
   type BrowserTab,
   type BrowserTabsState,
 } from './tab-store.ts'
+import {
+  commitCurrentOpen,
+  commitCurrentTabs,
+  currentOpen,
+  currentTabs,
+  emptySessionScope,
+  pruneMissingSessions,
+  setCurrentSession,
+  type SessionScopedState,
+} from './session-scope.ts'
 
 /** Where session http(s) links open. Mirrors the Host DesktopSettings.openLinksIn. */
 export type OpenLinksIn = 'external' | 'browser'
@@ -71,16 +80,14 @@ const DEFAULT_PANEL_WIDTH = 560
 const MIN_PANEL_WIDTH = 280
 const MAX_PANEL_WIDTH = 1100
 
-/** Module-level panel state: one per app window (not per session). */
-interface ExternalBrowserState extends BrowserTabsState {
-  open: boolean
+/** Module-level panel state: per-session tabs/open + window-global settings. */
+interface ExternalBrowserState extends SessionScopedState {
   openLinksIn: OpenLinksIn
   width: number
 }
 
 const state: ExternalBrowserState = {
-  ...emptyTabs(),
-  open: false,
+  ...emptySessionScope(),
   openLinksIn: 'external',
   width: DEFAULT_PANEL_WIDTH,
 }
@@ -91,10 +98,26 @@ function subscribe(fn: () => void): () => void {
   return () => { listeners.delete(fn) }
 }
 
-/** Replace tab fields and broadcast. */
+/** Whether the panel is open for the current session. */
+function panelOpen(): boolean {
+  return currentOpen(state)
+}
+
+/** Write the current session's tab list and broadcast. */
 function commitTabs(patch: BrowserTabsState): void {
-  state.tabs = patch.tabs
-  state.activeTabId = patch.activeTabId
+  const next = commitCurrentTabs(state, patch)
+  state.tabsBySession = next.tabsBySession
+  state.openBySession = next.openBySession
+  state.currentSessionId = next.currentSessionId
+  notify()
+}
+
+/** Write the current session's open state and broadcast. */
+function commitOpen(open: boolean): void {
+  const next = commitCurrentOpen(state, open)
+  state.tabsBySession = next.tabsBySession
+  state.openBySession = next.openBySession
+  state.currentSessionId = next.currentSessionId
   notify()
 }
 
@@ -102,7 +125,7 @@ function commitTabs(patch: BrowserTabsState): void {
 function applyBrowserLayout(): void {
   const root = document.getElementById('root')
   if (!root) return
-  root.style.paddingRight = state.open ? `${state.width}px` : ''
+  root.style.paddingRight = panelOpen() ? `${state.width}px` : ''
 }
 
 /** Clamp a panel width to the allowed range. */
@@ -112,60 +135,59 @@ function clampWidth(width: number): number {
 
 /** Return whether the window currently displays the external browser panel. */
 export function externalBrowserOpen(): boolean {
-  return state.open
+  return panelOpen()
 }
 
 /** Open (creating if needed) a new tab with an optional URL, then show panel. */
 export function openExternalBrowser(url = ''): void {
-  commitTabs(openTab(state, url))
-  state.open = true
-  applyBrowserLayout()
-  notify()
+  commitTabs(openTab(currentTabs(state), url))
+  if (!panelOpen()) {
+    commitOpen(true)
+    applyBrowserLayout()
+  }
 }
 
 /** Close the embedded browser panel, preserving open tabs. */
 export function closeExternalBrowser(): void {
-  state.open = false
+  commitOpen(false)
   applyBrowserLayout()
-  notify()
 }
 
 /** Toggle panel visibility; opening with no tabs creates one. */
 export function toggleExternalBrowser(): void {
-  if (state.open) {
+  if (panelOpen()) {
     closeExternalBrowser()
     return
   }
-  if (state.tabs.length === 0) commitTabs(openTab(state))
-  state.open = true
+  if (currentTabs(state).tabs.length === 0) commitTabs(openTab(currentTabs(state)))
+  commitOpen(true)
   applyBrowserLayout()
-  notify()
 }
 
 /** Activate an existing tab. */
 function activateById(id: string): void {
-  commitTabs(activateTab(state, id))
+  commitTabs(activateTab(currentTabs(state), id))
 }
 
 /** Close a tab; when the last one closes, hide the panel. */
 function closeById(id: string): void {
-  const next = closeTab(state, id)
+  const tabs = currentTabs(state)
+  const next = closeTab(tabs, id)
   commitTabs(next)
   if (next.tabs.length === 0) {
-    state.open = false
+    commitOpen(false)
     applyBrowserLayout()
   }
-  notify()
 }
 
 /** Set a tab's URL from within a guest view. */
 function setUrlById(id: string, url: string): void {
-  commitTabs(setTabUrl(state, id, url))
+  commitTabs(setTabUrl(currentTabs(state), id, url))
 }
 
 /** Set a tab's title from a page-title-updated event. */
 function setTitleById(id: string, title: string): void {
-  commitTabs(setTabTitle(state, id, title))
+  commitTabs(setTabTitle(currentTabs(state), id, title))
 }
 
 /** Current link-open behavior. */
@@ -178,7 +200,7 @@ export function ExternalBrowserToggle(): JSX.Element {
   const [, setTick] = useState(0)
   useEffect(() => subscribe(() => setTick((x) => x + 1)), [])
   // Hidden while the panel is open (⌘/Ctrl+Option+B or the panel ✕ re-shows it).
-  if (state.open) return <></>
+  if (panelOpen()) return <></>
   return (
     <button
       type="button"
@@ -378,7 +400,7 @@ export function ExternalBrowserPanel(): JSX.Element {
       const root = document.getElementById('root')
       if (root) root.style.paddingRight = ''
     }
-  }, [state.open, state.width])  // eslint-disable-line react-hooks/exhaustive-deps
+  }, [panelOpen(), state.width])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const startDrag = (event: React.PointerEvent<HTMLDivElement>): void => {
     event.preventDefault()
@@ -404,7 +426,8 @@ export function ExternalBrowserPanel(): JSX.Element {
     document.body.classList.remove('dsh-desktop-browser-dragging')
   }
 
-  if (!state.open) return <></>
+  const tabs = currentTabs(state)
+  if (!panelOpen()) return <></>
 
   return (
     <div className="dshExternalBrowser" data-open="true" style={{ width: `${state.width}px` }}>
@@ -418,24 +441,24 @@ export function ExternalBrowserPanel(): JSX.Element {
         aria-orientation="vertical"
       />
       <BrowserTabBar
-        tabs={state.tabs}
-        activeTabId={state.activeTabId}
+        tabs={tabs.tabs}
+        activeTabId={tabs.activeTabId}
         onActivate={activateById}
         onClose={closeById}
         onNew={() => openExternalBrowser()}
       />
-      {state.tabs.map((tab) => (
+      {tabs.tabs.map((tab) => (
         <BrowserTabView
           key={tab.id}
           tab={tab}
-          active={tab.id === state.activeTabId}
+          active={tab.id === tabs.activeTabId}
           openLinksIn={state.openLinksIn}
           onUrlChange={setUrlById}
           onTitleChange={setTitleById}
           onClose={closeById}
         />
       ))}
-      {state.tabs.length === 0 && (
+      {tabs.tabs.length === 0 && (
         <div className="dshExternalBrowserEmpty">
           <button type="button" className="dshExternalBrowserEmptyCTA" onClick={() => openExternalBrowser()}>
             ＋ New tab
@@ -490,8 +513,9 @@ export function installBrowserShortcuts(): () => void {
     }
     if (key === 'w') {
       event.preventDefault()
-      if (state.activeTabId) closeById(state.activeTabId)
-      else if (state.open) closeExternalBrowser()
+      const active = currentTabs(state).activeTabId
+      if (active) closeById(active)
+      else if (panelOpen()) closeExternalBrowser()
       return
     }
     if (key === 'b' && event.altKey) {
@@ -518,6 +542,31 @@ export function applyExternalBrowser(ctx: ClientContext): () => void {
   }
   bootstrap()
 
+  // Follow the selected session so tabs + panel open state are scoped per
+  // session: switching sessions restores that session's last known state.
+  const sessionsList = ctx.sessions.list
+  let lastCurrent: string | undefined
+  let unsubscribeSessions: (() => void) | undefined
+  const onSessions = (): void => {
+    const snap = sessionsList.getSnapshot()
+    const current = snap.current
+    if (current === lastCurrent) return
+    lastCurrent = current
+    if (current === undefined) {
+      state.currentSessionId = null
+    } else {
+      const next = setCurrentSession(state, current, snap.ids)
+      const pruned = pruneMissingSessions(next, new Set(snap.ids))
+      state.tabsBySession = pruned.tabsBySession
+      state.openBySession = pruned.openBySession
+      state.currentSessionId = pruned.currentSessionId
+    }
+    applyBrowserLayout()
+    notify()
+  }
+  onSessions()
+  unsubscribeSessions = sessionsList.subscribe(onSessions)
+
   const disposers: Array<() => void> = [
     ctx.slots.inject('shell.overlay', () => ctx.slots.register(
       { name: 'shell.overlay', id: 'dsh-desktop-external-browser', order: 50 },
@@ -530,6 +579,7 @@ export function applyExternalBrowser(ctx: ClientContext): () => void {
     installLinkInterception(),
     installBrowserShortcuts(),
     installExternalBrowserCss(),
+    () => { if (unsubscribeSessions) unsubscribeSessions() },
   ]
   return () => {
     disposers.forEach((dispose) => dispose())
