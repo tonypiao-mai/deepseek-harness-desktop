@@ -60,10 +60,17 @@ interface ExternalBrowserState {
   open: boolean
   url: string
   openLinksIn: OpenLinksIn
+  width: number
 }
 
+/** Default panel width in CSS pixels. */
+const DEFAULT_PANEL_WIDTH = 560
+/** Minimum and maximum panel widths in CSS pixels. */
+const MIN_PANEL_WIDTH = 280
+const MAX_PANEL_WIDTH = 1100
+
 /** Module-level panel state: one per app window (not per session). */
-const state: ExternalBrowserState = { open: false, url: '', openLinksIn: 'external' }
+const state: ExternalBrowserState = { open: false, url: '', openLinksIn: 'external', width: DEFAULT_PANEL_WIDTH }
 const listeners = new Set<() => void>()
 function notify(): void { listeners.forEach((fn) => fn()) }
 function subscribe(fn: () => void): () => void {
@@ -80,13 +87,30 @@ export function externalBrowserOpen(): boolean {
 export function openExternalBrowser(url = ''): void {
   if (url) state.url = url
   state.open = true
+  applyBrowserLayout()
   notify()
 }
 
 /** Close the embedded browser panel. */
 export function closeExternalBrowser(): void {
   state.open = false
+  applyBrowserLayout()
   notify()
+}
+
+/**
+ * Reserve space for the panel by shrinking the app root, so the browser sits
+ * side by side with the session instead of floating above it.
+ */
+function applyBrowserLayout(): void {
+  const root = document.getElementById('root')
+  if (!root) return
+  root.style.paddingRight = state.open ? `${state.width}px` : ''
+}
+
+/** Clamp a panel width to the allowed range. */
+function clampWidth(width: number): number {
+  return Math.max(MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, width))
 }
 
 /** Current link-open behavior. */
@@ -98,33 +122,38 @@ export function openLinksIn(): OpenLinksIn {
 export function ExternalBrowserToggle(): JSX.Element {
   const [, setTick] = useState(0)
   useEffect(() => subscribe(() => setTick((x) => x + 1)), [])
+  // Hidden while the panel is open (the panel's own ✕ re-shows it).
+  if (state.open) return <></>
   return (
     <button
       type="button"
       className="dshExternalBrowserToggle"
       aria-label="网页浏览器"
-      title={state.open ? '关闭网页浏览器' : '打开网页浏览器'}
+      title="Open web browser"
       style={{ display: 'var(--dsh-external-browser-toggle, inline-flex)' }}
-      onClick={() => (state.open ? closeExternalBrowser() : openExternalBrowser())}
+      onClick={() => openExternalBrowser()}
     >
-      {state.open ? '✕' : '🌐'}
+      🌐
     </button>
   )
 }
 
-/** The embedded browser panel: toolbar + <webview> guest. */
+/** The embedded browser panel: a right-side column with a resizable divider. */
 export function ExternalBrowserPanel(): JSX.Element {
   const webviewRef = useRef<WebviewElement | null>(null)
   const domReady = useRef(false)
   const pendingURL = useRef<string | undefined>(undefined)
+  const dragState = useRef<{ startX: number; startWidth: number } | null>(null)
+  const [, setTick] = useState(0)
   const [address, setAddress] = useState(state.url)
   const [title, setTitle] = useState('')
   const [canBack, setCanBack] = useState(false)
   const [canForward, setCanForward] = useState(false)
-  const [open, setOpen] = useState(state.open)
 
+  // Re-render on any state change (open, url, mode, width) so live reads like
+  // the checkbox stay in sync immediately.
   useEffect(() => subscribe(() => {
-    setOpen(state.open)
+    setTick((x) => x + 1)
     if (state.url) setAddress(state.url)
   }), [])
 
@@ -175,7 +204,7 @@ export function ExternalBrowserPanel(): JSX.Element {
     }
     const onFail = (event: Event): void => {
       const detail = (event as unknown as { errorCode?: unknown; errorDescription?: unknown }).errorDescription
-      setTitle(String(detail ?? '页面加载失败'))
+      setTitle(String(detail ?? 'Page failed to load'))
     }
     wv.addEventListener('dom-ready', onDomReady)
     wv.addEventListener('did-navigate', onNavigate)
@@ -189,7 +218,16 @@ export function ExternalBrowserPanel(): JSX.Element {
       wv.removeEventListener('page-title-updated', onTitle)
       wv.removeEventListener('did-fail-load', onFail)
     }
-  }, [open])  // eslint-disable-line react-hooks/exhaustive-deps
+  }, [state.open])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reserve right-side space on the app root whenever the panel is open.
+  useEffect(() => {
+    applyBrowserLayout()
+    return () => {
+      const root = document.getElementById('root')
+      if (root) root.style.paddingRight = ''
+    }
+  }, [state.open, state.width])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadURL = (url: string): void => {
     const wv = webviewRef.current
@@ -211,10 +249,39 @@ export function ExternalBrowserPanel(): JSX.Element {
     loadURL(url)
   }
 
-  if (!open) return <></>
+  const startDrag = (event: React.PointerEvent): void => {
+    event.preventDefault()
+    dragState.current = { startX: event.clientX, startWidth: state.width }
+    document.body.classList.add('dsh-desktop-browser-dragging')
+  }
+  const moveDrag = (event: React.PointerEvent): void => {
+    const drag = dragState.current
+    if (!drag) return
+    // Dragging left increases panel width (handle sits on the panel's left edge).
+    const next = clampWidth(drag.startWidth + (drag.startX - event.clientX))
+    if (next !== state.width) {
+      state.width = next
+      notify()
+    }
+  }
+  const endDrag = (): void => {
+    dragState.current = null
+    document.body.classList.remove('dsh-desktop-browser-dragging')
+  }
+
+  if (!state.open) return <></>
 
   return (
-    <div className="dshExternalBrowser" data-open={open ? 'true' : 'false'}>
+    <div className="dshExternalBrowser" data-open="true" style={{ width: `${state.width}px` }}>
+      <div
+        className="dshExternalBrowserHandle"
+        onPointerDown={startDrag}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        role="separator"
+        aria-orientation="vertical"
+      />
       <div className="dshExternalBrowserToolbar">
         <button type="button" disabled={!canBack} onClick={() => webviewRef.current?.goBack()}>←</button>
         <button type="button" disabled={!canForward} onClick={() => webviewRef.current?.goForward()}>→</button>
@@ -222,7 +289,7 @@ export function ExternalBrowserPanel(): JSX.Element {
         <input
           className="dshExternalBrowserAddress"
           value={address}
-          placeholder="地址"
+          placeholder="Address"
           onChange={(event) => setAddress(event.currentTarget.value)}
           onKeyDown={(event) => { if (event.key === 'Enter') navigate() }}
         />
@@ -238,7 +305,7 @@ export function ExternalBrowserPanel(): JSX.Element {
               notify()
             }}
           />
-          <span>链接在面板打开</span>
+          <span>Open links in panel</span>
         </label>
         <button type="button" onClick={closeExternalBrowser}>✕</button>
       </div>
@@ -312,19 +379,26 @@ function installExternalBrowserCss(): () => void {
   style.id = 'dsh-desktop-external-browser-styles'
   style.textContent = `
 .dshExternalBrowserToggle {
-  position: fixed; top: 12px; right: 12px; z-index: 1049;
-  --dsw-btn-bg: var(--dsw-alias-bg-layer-1, rgba(128,128,128,.12));
+  position: fixed; top: 12px; right: 14px; z-index: 1049;
   display: inline-flex; align-items: center; justify-content: center;
   width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l2, #333);
   background: var(--dsw-alias-bg-layer-1, rgba(128,128,128,.12)); color: var(--dsw-alias-label-primary, #e6e6e6);
   cursor: pointer; font-size: 15px; line-height: 1;
 }
 .dshExternalBrowserToggle:hover { border-color: var(--dsw-alias-brand-primary, #4f8cff); }
-.dshExternalBrowser { position: fixed; top: 10px; right: 10px; bottom: 10px; width: 560px; max-width: 70vw;
-  z-index: 1050; display: flex; flex-direction: column; overflow: hidden;
-  background: var(--dsw-alias-bg-overlay, #171a21); border: 1px solid var(--dsw-alias-border-l2, #333);
-  border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25);
+/* Side-by-side right column: the app root's padding-right reserves the space,
+   so this column sits beside the session instead of floating above it. */
+.dshExternalBrowser { position: fixed; top: 0; right: 0; bottom: 0; z-index: 1050;
+  display: flex; flex-direction: column; overflow: hidden; background: var(--dsw-alias-bg-base, #0d1117);
+  border-left: 1px solid var(--dsw-alias-border-l2, #333);
 }
+.dshExternalBrowserHandle { position: absolute; left: 0; top: 0; bottom: 0; width: 6px; margin-left: -3px;
+  cursor: col-resize; touch-action: none; z-index: 5; }
+.dshExternalBrowserHandle::after { content: ""; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  width: 4px; height: 44px; border-radius: 4px; background: var(--dsw-alias-brand-primary, #4f8cff); opacity: 0; transition: opacity .15s; }
+body.dsh-desktop-browser-dragging { cursor: col-resize; user-select: none; }
+.dsh-desktop-browser-dragging .dshExternalBrowserHandle::after,
+.dshExternalBrowserHandle:hover::after { opacity: 1; }
 .dshExternalBrowserToolbar { display: flex; align-items: center; gap: 6px; padding: 8px 10px;
   border-bottom: 1px solid var(--dsw-alias-border-l2, #333); flex: none; }
 .dshExternalBrowserToolbar button { width: 26px; height: 26px; border-radius: 6px; border: none;
@@ -334,7 +408,7 @@ function installExternalBrowserCss(): () => void {
 .dshExternalBrowserAddress { flex: 1; min-width: 0; height: 26px; padding: 0 8px; border-radius: 6px;
   border: 1px solid var(--dsw-alias-border-l2, #333); background: var(--dsw-alias-bg-base, #0d1117);
   color: var(--dsw-alias-label-primary, #e6e6e6); font-size: 12px; outline: none; }
-.dshExternalBrowserTitle { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.dshExternalBrowserTitle { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--dsw-alias-label-secondary, #9aa0a6); font-size: 12px; }
 .dshExternalBrowserMode { display: inline-flex; align-items: center; gap: 4px; color: var(--dsw-alias-label-secondary, #9aa0a6); font-size: 12px; white-space: nowrap; }
 .dshExternalBrowserBody { flex: 1; min-height: 0; position: relative; }
