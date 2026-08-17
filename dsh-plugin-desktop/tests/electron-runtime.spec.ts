@@ -245,6 +245,7 @@ describe('Electron compatibility runtime', () => {
         nodeIntegration: false,
         sandbox: true,
         webSecurity: true,
+        webviewTag: true,
       },
     }))
     expect(options).not.toHaveProperty('autoHideMenuBar')

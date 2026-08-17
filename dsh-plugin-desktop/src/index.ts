@@ -1,6 +1,7 @@
 /** DSH Desktop Host plugin: owns the selected native shell generation. */
 
 import { fileURLToPath } from 'node:url'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-cmdline'
@@ -14,7 +15,7 @@ import {
   handleRendererBootRequest,
   RENDERER_BOOT_REPORT_PATH,
 } from './renderer-boot.ts'
-import type { DesktopShellMode } from './runtime.ts'
+import { DESKTOP_SETTINGS_RENDERER_PATH, type DesktopShellMode } from './runtime.ts'
 import type {} from './runtime.ts'
 
 /** Stable Cordis plugin name. */
@@ -33,11 +34,14 @@ const UI_THEME_SETTINGS_NAMESPACE = settingsNamespace(THEME_SETTINGS_NAMESPACE)
 export interface DesktopSettings {
   /** Native presentation selected for the next application generation. */
   mode: DesktopShellMode
+  /** Where session http(s) links open: the OS browser or the in-app panel. */
+  openLinksIn: 'external' | 'browser'
 }
 
 /** Schema registered with the standard settings service. */
 export const DesktopSettingsSchema: z<DesktopSettings> = z.object({
   mode: z.union(['compatibility', 'advanced'] as const).default('compatibility'),
+  openLinksIn: z.union(['external', 'browser'] as const).default('external'),
 })
 
 /** Native window configuration. */
@@ -79,6 +83,64 @@ export function desktopRendererUrl(
   url.searchParams.set('dsh-desktop-mode', mode)
   url.searchParams.set('dsh-desktop-platform', platform)
   return url.href
+}
+
+/**
+ * Read or update desktop settings from the same-origin renderer.
+ *
+ * @param origin - allowed renderer origin used for same-origin enforcement.
+ * @param read - return the current effective desktop settings.
+ * @param write - persist a new `openLinksIn` value.
+ * @returns a webServer handler owning the full response lifecycle.
+ */
+function handleDesktopSettingsRequest(
+  origin: string,
+  read: () => DesktopSettings,
+  write: (value: 'external' | 'browser') => Promise<void>,
+): (req: IncomingMessage, res: ServerResponse) => void | Promise<void> {
+  return (req, res) => {
+    const originHeader = String(req.headers.origin || '')
+    if (originHeader !== origin) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, error: 'forbidden origin' }))
+      return
+    }
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, settings: read() }))
+      return
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, error: 'method not allowed' }))
+      return
+    }
+    let body = ''
+    req.on('data', (chunk) => { body += String(chunk) })
+    req.on('end', () => {
+      let parsed: { openLinksIn?: unknown } = {}
+      try {
+        parsed = JSON.parse(body) as { openLinksIn?: unknown }
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'invalid json' }))
+        return
+      }
+      const next = parsed.openLinksIn
+      if (next !== 'external' && next !== 'browser') {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'openLinksIn must be external or browser' }))
+        return
+      }
+      void write(next).then(() => {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, settings: read() }))
+      }).catch((cause: unknown) => {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: String((cause as Error)?.message ?? cause) }))
+      })
+    })
+  }
 }
 
 /**
@@ -136,6 +198,20 @@ export function apply(ctx: Context, config: Config): void {
       ),
     }),
     'dsh-plugin-desktop: renderer boot report route',
+  )
+  // Renderer bridge for reading/toggling desktop settings (name + openLinksIn).
+  // The client has no direct settings RPC, so expose a same-origin route.
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: DESKTOP_SETTINGS_RENDERER_PATH,
+      handler: handleDesktopSettingsRequest(
+        rendererOrigin,
+        () => settings.get(),
+        next => settings.update({ openLinksIn: next }),
+      ),
+    }),
+    'dsh-plugin-desktop: desktop settings renderer route',
   )
   ctx.effect(() => {
     let pending: ReturnType<typeof setImmediate> | undefined

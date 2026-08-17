@@ -15,6 +15,7 @@ import {
   type Config as DesktopConfig,
   type DesktopSettings,
 } from '../src/index.ts'
+import { DESKTOP_SETTINGS_RENDERER_PATH } from '../src/runtime.ts'
 import type { DesktopRuntime, DesktopShellSpec } from '../src/runtime.ts'
 import { RENDERER_BOOT_REPORT_PATH, type RendererBootReport } from '../src/renderer-boot-contract.ts'
 
@@ -37,6 +38,7 @@ interface PluginHarness {
   setThemeSource: ReturnType<typeof vi.fn<(source: ThemePreference) => void>>
   rendererBoot: ReturnType<typeof vi.fn<(report: RendererBootReport) => void>>
   rendererRoute(): WebRoute | undefined
+  settingsRoute(): WebRoute | undefined
   notify(next: DesktopSettings, prev: DesktopSettings): Promise<void>
   notifyTheme(preference: ThemePreference): void
 }
@@ -48,7 +50,7 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
   const restart = vi.fn(async () => {})
   const setThemeSource = vi.fn<(source: ThemePreference) => void>()
   const rendererBoot = vi.fn<(report: RendererBootReport) => void>()
-  let rendererRoute: WebRoute | undefined
+  const routes: WebRoute[] = []
   let settingsUpdated: ((namespace: unknown, next: unknown) => void) | undefined
   let themePreference: ThemePreference = 'system'
   const runtime: DesktopRuntime = {
@@ -97,8 +99,11 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
       host: '127.0.0.1',
       port: 43120,
       register: vi.fn((route: WebRoute) => {
-        rendererRoute = route
-        return () => { if (rendererRoute === route) rendererRoute = undefined }
+        routes.push(route)
+        return () => {
+          const index = routes.indexOf(route)
+          if (index !== -1) routes.splice(index, 1)
+        }
       }),
     },
     settings,
@@ -118,7 +123,8 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     restart,
     setThemeSource,
     rendererBoot,
-    rendererRoute: () => rendererRoute,
+    rendererRoute: () => routes.find((route) => route.path === RENDERER_BOOT_REPORT_PATH),
+    settingsRoute: () => routes.find((route) => route.path === DESKTOP_SETTINGS_RENDERER_PATH),
     notify: async (next, prev) => { await watcher?.(next, prev) },
     notifyTheme: (preference) => {
       themePreference = preference
@@ -131,7 +137,7 @@ describe('desktop Host plugin', () => {
   it('defaults to compatibility mode and validates both schemas', () => {
     expect(Config({} as DesktopConfig)).toEqual(config)
     expect(Config({ mode: 'advanced' } as DesktopConfig)).toEqual({ ...config, mode: 'advanced' })
-    expect(DesktopSettingsSchema({} as DesktopSettings)).toEqual({ mode: 'compatibility' })
+    expect(DesktopSettingsSchema({} as DesktopSettings)).toEqual({ mode: 'compatibility', openLinksIn: 'external' })
     expect(() => Config({ mode: 'custom' } as never)).toThrow()
     expect(String(DESKTOP_SETTINGS_NAMESPACE)).toBe('dsh-desktop')
   })
@@ -243,11 +249,11 @@ describe('desktop Host plugin', () => {
     const harness = createHarness()
     apply(harness.ctx, config)
 
-    await harness.notify({ mode: 'compatibility' }, { mode: 'compatibility' })
+    await harness.notify({ mode: 'compatibility', openLinksIn: 'external' }, { mode: 'compatibility', openLinksIn: 'external' })
     expect(harness.restart).not.toHaveBeenCalled()
 
     harness.restart.mockImplementation(() => new Promise<void>(() => {}))
-    await harness.notify({ mode: 'advanced' }, { mode: 'compatibility' })
+    await harness.notify({ mode: 'advanced', openLinksIn: 'external' }, { mode: 'compatibility', openLinksIn: 'external' })
     await vi.runAllTimersAsync()
     expect(harness.restart).toHaveBeenCalledOnce()
   })
